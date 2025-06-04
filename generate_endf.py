@@ -51,7 +51,7 @@ def main():
                         default='viii.0', help="The nuclear data library release "
                         "version. The currently supported options are vii.1, "
                         "viii.0")
-    parser.add_argument('-p', '--particles', choices=['neutron', 'photon', 'wmp'],
+    parser.add_argument('-p', '--particles', choices=['neutron', 'photon', 'photonuclear', 'wmp'],
                         nargs='+', default=['neutron', 'photon'],
                         help="Incident particles to include, wmp is not available "
                         "for release b8.0 at the moment")
@@ -139,6 +139,15 @@ def main():
                 'compressed_file_size': 9,
                 'uncompressed_file_size': 45
             },
+            'photonuclear': {
+                'base_url': 'http://www.nndc.bnl.gov/endf-b7.1/zips/',
+                'compressed_files': ['ENDF-B-VII.1-gammas.zip'],
+                'checksums': ['2a9dd2223f34429c63a205fe8a8c5791'],
+                'file_type': 'endf',
+                'photonuclear_files': endf_files_dir.joinpath('gammas').rglob('g*.endf'),
+                'compressed_file_size': 57,
+                'uncompressed_file_size': 229.3
+            },
             'wmp': {
                 'base_url': 'https://github.com/mit-crpg/WMP_Library/releases/download/v1.1/',
                 'compressed_files': ['WMP_Library_v1.1.tar.gz'],
@@ -208,7 +217,16 @@ def main():
                 'atom_files': endf_files_dir.joinpath('photon').rglob('atom*.endf'),
                 'compressed_file_size': 1.2+35,
                 'uncompressed_file_size': 999999
-            }
+            },
+            'photonuclear': {
+                'base_url': 'https://www.nndc.bnl.gov/endf-b8.0/',
+                'compressed_files': ['zips/ENDF-B-VIII.0_gammas.zip'],
+                'checksums': ['4eb8a577afe27e411952cf68d85c648f'],
+                'file_type': 'endf',
+                'photonuclear_files': endf_files_dir.joinpath('ENDF-B-VIII.0_gammas').rglob('g*.endf'),
+                'compressed_file_size': 51.4,
+                'uncompressed_file_size': 217.2
+            },
         }
     }
 
@@ -340,6 +358,24 @@ def main():
             # Generate instance of IncidentPhoton
             print('Converting:', photo_path.name, atom_path.name)
             data = openmc.data.IncidentPhoton.from_endf(photo_path, atom_path)
+
+            # Export HDF5 file
+            h5_file = args.destination / particle / f'{data.name}.h5'
+            data.export_to_hdf5(h5_file, 'w', libver=args.libver)
+
+            # Register with library
+            library.register_file(h5_file)
+ 
+   # =========================================================================
+    # INCIDENT PHOTONUCLEAR DATA
+
+    if 'photonuclear' in args.particles:
+        particle = 'photonuclear'
+        details = release_details[args.release][particle]
+        for photonuclear_path in sorted(details['photonuclear_files']):
+            # Generate instance of IncidentPhotonuclear
+            print('Converting:', photonuclear_path.name)
+            data = openmc.data.IncidentPhotonuclear.from_njoy(photonuclear_path)
 
             # Export HDF5 file
             h5_file = args.destination / particle / f'{data.name}.h5'
