@@ -38,6 +38,8 @@ parser.add_argument('--libver', choices=['earliest', 'latest'],
                     "performance")
 parser.add_argument('-p', '--photon', type=Path,
                     help='Path to photoatomic data library (eprdata12 or later)')
+parser.add_argument('-pn', '--photonuclear', type=Path,
+                    help='Path to photonuclear data library (endf7u)')
 parser.add_argument('mcnpdata', type=Path,
                     help='Directory containing endf71x and ENDF71SaB')
 args = parser.parse_args()
@@ -120,6 +122,23 @@ if args.photon is not None:
 
         # Export HDF5 file
         h5_file = args.destination / 'photon' / f'{data.name}.h5'
+        print(f'Writing {h5_file}...')
+        data.export_to_hdf5(h5_file, 'w', libver=args.libver)
+
+        # Register with library
+        library.register_file(h5_file)
+
+# Handle photonuclear data
+if args.photonuclear is not None:
+    lib = openmc.data.ace.Library(args.photonuclear)
+
+    for table in lib.tables:
+        # Convert first temperature for the table
+        print(f'Converting: {table.name}')
+        data = openmc.data.IncidentPhotonuclear.from_ace(table, 'mcnp')
+
+        # Export HDF5 file
+        h5_file = args.destination / 'photonuclear' / f'{data.name}.h5'
         print(f'Writing {h5_file}...')
         data.export_to_hdf5(h5_file, 'w', libver=args.libver)
 
