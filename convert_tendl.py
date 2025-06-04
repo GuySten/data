@@ -71,33 +71,37 @@ if args.destination is None:
 release_details = {
     '2015': {
         'base_url': 'https://tendl.web.psi.ch/tendl_2015/tar_files/',
-        'compressed_files': ['ACE-n.tgz'],
+        'compressed_files': ['ACE-n.tgz','ACE-g.tgz'],
         'neutron_files': ace_files_dir.glob('neutron_file/*/*/lib/endf/*-n.ace'),
+        'photonuclear_files': ace_files_dir.glob('gamma_file/*/*/lib/endf/*-g.ace'),
         'metastables': ace_files_dir.glob('neutron_file/*/*/lib/endf/*m-n.ace'),
         'compressed_file_size': '5.1 GB',
         'uncompressed_file_size': '40 GB'
     },
     '2017': {
         'base_url': 'https://tendl.web.psi.ch/tendl_2017/tar_files/',
-        'compressed_files': ['tendl17c.tar.bz2'],
+        'compressed_files': ['tendl17c.tar.bz2','TENDL-283-g.tgz'],
         'neutron_files': ace_files_dir.glob('ace-17/*'),
+        'photonuclear_files': ace_files_dir.glob('tendl17u'),
         'metastables': ace_files_dir.glob('ace-17/*m'),
         'compressed_file_size': '2.1 GB',
         'uncompressed_file_size': '14 GB'
     },
     '2019': {
         'base_url': 'https://tendl.web.psi.ch/tendl_2019/tar_files/',
-        'compressed_files': ['tendl19c.tar.bz2'],
+        'compressed_files': ['tendl19c.tar.bz2','tendl19u.tar.bz2'],
         'neutron_files': ace_files_dir.glob('tendl19c/*'),
+        'photonuclear_files': ace_files_dir.glob('tendl19u/*'),
         'metastables': ace_files_dir.glob('tendl19c/*m'),
         'compressed_file_size': '2.3 GB',
         'uncompressed_file_size': '10.1 GB'
     },
     '2021': {
         'base_url': 'https://tendl.web.psi.ch/tendl_2021/tar_files/',
-        'compressed_files': ['tendl21c.tar.bz2'],
+        'compressed_files': ['tendl21c.tar.bz2','tendl21u.tar.bz2'],
         'neutron_files': ace_files_dir.glob('tendl21c/*'),
         'metastables': ace_files_dir.glob('tendl21c/*m'),
+        'photonuclear_files': ace_files_dir.glob('tendl21u/*[0-9]'),
         'compressed_file_size': '2.2 GB',
         'uncompressed_file_size': '10.5 GB'
     }
@@ -147,14 +151,15 @@ for path in metastables:
 # GENERATE HDF5 LIBRARY -- NEUTRON FILES
 
 # Get a list of all ACE files
-neutron_files = release_details[args.release]['neutron_files']
+neutron_files = sorted(release_details[args.release]['neutron_files'])
 
 # Create output directory if it doesn't exist
 args.destination.mkdir(parents=True, exist_ok=True)
+(args.destination/'photonuclear').mkdir(parents=True, exist_ok=True)
 
 library = openmc.data.DataLibrary()
 
-for filename in sorted(neutron_files):
+for filename in neutron_files:
 
     # this is a fix for the TENDL-2017 release where the B10 ACE file which has an error on one of the values
     if library_name == 'tendl' and args.release == '2017' and filename.name == 'B010':
@@ -175,6 +180,44 @@ for filename in sorted(neutron_files):
 
     # Register with library
     library.register_file(h5_file)
+
+# ==============================================================================
+# GENERATE HDF5 LIBRARY -- PHOTONUCLEAR FILES
+
+# Get a list of all ACE files
+photonuclear_files = sorted(release_details[args.release]['photonuclear_files'])
+
+# Create output directory if it doesn't exist
+(args.destination/'photonuclear').mkdir(parents=True, exist_ok=True)
+
+if len(photonuclear_files)>1: 
+    for filename in photonuclear_files:
+
+        print(f'Converting: {filename}')
+        data = openmc.data.IncidentPhotonuclear.from_ace(filename)
+
+        # Export HDF5 file
+        h5_file = args.destination / 'photonuclear' / f'{data.name}.h5'
+        print('Writing {}...'.format(h5_file))
+        data.export_to_hdf5(h5_file, 'w', libver=args.libver)
+
+        # Register with library
+        library.register_file(h5_file)
+else:
+    lib = openmc.data.ace.Library(photonuclear_files[0])
+
+    for table in lib.tables:
+        # Convert first temperature for the table
+        print(f'Converting: {table.name}')
+        data = openmc.data.IncidentPhotonuclear.from_ace(table)
+
+        # Export HDF5 file
+        h5_file = args.destination / 'photonuclear' / f'{data.name}.h5'
+        print(f'Writing {h5_file}...')
+        data.export_to_hdf5(h5_file, 'w', libver=args.libver)
+
+        # Register with library
+        library.register_file(h5_file)
 
 # Write cross_sections.xml
 library.export_to_xml(args.destination / 'cross_sections.xml')
