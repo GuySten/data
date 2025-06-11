@@ -61,7 +61,8 @@ if (hydrogen / '1001.720nc').is_file():
 
 # There's a bug in H-Zr at 1200 K
 thermal = args.mcnpdata / 'ENDF71SaB'
-endf71sab.remove(thermal / 'h-zr.27t')
+if thermal / 'h-zr.27t' in endf71sab:
+    endf71sab.remove(thermal / 'h-zr.27t')
 
 # Check for updated TSL files and remove old ones if present
 checks = [
@@ -82,7 +83,7 @@ for p in sorted(endf71x + endf71sab):
     tables[p.stem].append(p)
 
 # Create output directory if it doesn't exist
-(args.destination / 'photon').mkdir(parents=True, exist_ok=True)
+args.destination.mkdir(parents=True, exist_ok=True)
 
 library = openmc.data.DataLibrary()
 
@@ -113,6 +114,9 @@ for name, paths in sorted(tables.items()):
 
 # Handle photoatomic data
 if args.photon is not None:
+    # Create output directory if it doesn't exist
+    (args.destination / 'photon').mkdir(parents=True, exist_ok=True)
+ 
     lib = openmc.data.ace.Library(args.photon)
 
     for table in lib.tables:
@@ -130,6 +134,10 @@ if args.photon is not None:
 
 # Handle photonuclear data
 if args.photonuclear is not None:
+
+    # Create output directory if it doesn't exist
+    (args.destination / 'photonuclear').mkdir(parents=True, exist_ok=True)
+
     lib = openmc.data.ace.Library(args.photonuclear)
 
     for table in lib.tables:
