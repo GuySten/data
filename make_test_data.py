@@ -10,6 +10,7 @@ regression test suite.
 import glob
 import os
 from pathlib import Path
+import shutil
 import tarfile
 import tempfile
 from urllib.parse import urljoin
@@ -166,7 +167,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
     # WINDOWED MULTIPOLE DATA
 
     # Move data into output directory
-    os.rename('WMP_Library', str(output_dir / 'wmp'))
+    shutil.move('WMP_Library',str(output_dir / 'wmp'))
 
     # Add multipole data to library
     for f in sorted(glob.glob('{}/wmp/*.h5'.format(output_dir))):
