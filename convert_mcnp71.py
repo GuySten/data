@@ -59,7 +59,9 @@ if (hydrogen / '1001.720nc').is_file():
 
 # There's a bug in H-Zr at 1200 K
 thermal = args.mcnpdata / 'ENDF71SaB'
-endf71sab.remove(thermal / 'h-zr.27t')
+hzr1200k = thermal / 'h-zr.27t'
+if hzr1200k in endf71sab:
+    endf71sab.remove(hzr1200k)
 
 # Check for updated TSL files and remove old ones if present
 checks = [
