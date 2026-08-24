@@ -113,10 +113,11 @@ for name, paths in sorted(tables.items()):
     # Register with library
     library.register_file(h5_file)
 
-# Handle photoatomic data
+# Handle photoatomic data and electroatomic data
 if args.photon is not None:
     # Create output directory if it doesn't exist
     (args.destination / 'photon').mkdir(parents=True, exist_ok=True)
+    (args.destination / 'electron').mkdir(parents=True, exist_ok=True)
  
     lib = openmc.data.ace.Library(args.photon)
 
@@ -130,6 +131,16 @@ if args.photon is not None:
         print(f'Writing {h5_file}...')
         data.export_to_hdf5(h5_file, 'w', libver=args.libver)
 
+        # Register with library
+        library.register_file(h5_file)
+        
+        data = openmc.data.IncidentElectron.from_ace(table)
+        
+        # Export HDF5 file
+        h5_file = args.destination / 'electron' / f'{data.name}.h5'
+        print(f'Writing {h5_file}...')
+        data.export_to_hdf5(h5_file, 'w', libver=args.libver)
+        
         # Register with library
         library.register_file(h5_file)
 
