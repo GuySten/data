@@ -4,9 +4,16 @@
 EPICS/EEDL tabulates elastic cross sections densely but the angular
 distributions on only 16 energies per element, with nothing between 0.256 and
 10 MeV.  A Dirac partial-wave calculation has no such gap.  This script runs
-ELSEPA once per element over PENELOPE's 96-point energy grid and writes the
-differential cross sections to a single HDF5 file with one zero-padded
-atomic-number group per element.  Nothing else is written.  ELSEPA also reports
+ELSEPA once per element and projectile over PENELOPE's 96-point energy grid and
+writes the differential cross sections to a single HDF5 file, with one
+zero-padded atomic-number group per element holding an 'electron' and a
+'positron' subgroup.  Nothing else is written.
+
+Both projectiles are needed.  The integrated cross sections differ by under a
+per cent, which is the Born limit and is symmetric in the charge, but the first
+transport cross section is not: a positron is repelled by the nucleus and stays
+out of the small-impact-parameter region that produces the large deflections.
+For lead its sigma_tr1 is 0.80 of the electron's at 21 MeV and 0.65 at 1 MeV.  ELSEPA also reports
 the integrated and the first- and second-transport cross sections, computed
 from the phase shifts rather than from the tabulated distribution, and they
 disagree with integrals of that distribution by up to about a percent.  The
@@ -66,15 +73,18 @@ n_angles = 606
 energy_re = re.compile(r'Kinetic energy\s*=\s*([0-9.E+-]+)\s*eV')
 
 
-def write_input(Z, path):
-    """Write an ELSEPA input deck covering the whole energy grid."""
+def write_input(Z, path, ielec):
+    """Write an ELSEPA input deck covering the whole energy grid.
+
+    ``ielec`` is -1 for an electron projectile and +1 for a positron.
+    """
     with open(path, 'w') as f:
         f.write(f'IZ    {Z:4}          atomic number\n')
         f.write('MNUCL   3          Fermi nuclear charge distribution\n')
         f.write(f'NELEC {Z:4}          neutral atom\n')
         f.write('MELEC   4          Dirac-Fock electron density\n')
         f.write('MUFFIN  0          free atom\n')
-        f.write('IELEC  -1          electron\n')
+        f.write(f'IELEC {ielec:4}          {"electron" if ielec < 0 else "positron"}\n')
         f.write('MEXCH   1          Furness-McCarthy exchange\n')
         f.write('MCPOL   2          LDA correlation-polarization\n')
         f.write('VPOLA  -1          measured atomic polarizability\n')
@@ -112,11 +122,11 @@ def read_dcs(path):
     return energy, 2.0*values[:, 0], values[:, 1]
 
 
-def run_element(Z, elscata, elsepa_data):
-    """Run ELSEPA for one element and return its differential cross sections."""
+def run_element(Z, elscata, elsepa_data, ielec):
+    """Run ELSEPA for one element and projectile, and return its DCS."""
     workdir = tempfile.mkdtemp(prefix=f'elsepa_z{Z:03}_')
     try:
-        write_input(Z, os.path.join(workdir, 'in.txt'))
+        write_input(Z, os.path.join(workdir, 'in.txt'), ielec)
         env = dict(os.environ, ELSEPA_DATA=str(elsepa_data))
         with open(os.path.join(workdir, 'in.txt')) as stdin, \
              open(os.path.join(workdir, 'run.log'), 'w') as stdout:
@@ -142,7 +152,7 @@ def run_element(Z, elscata, elsepa_data):
         if not np.allclose(found, energies, rtol=1e-6):
             raise RuntimeError(f'Z={Z}: energies do not match the grid')
 
-        return Z, mu, dcs
+        return Z, ielec, mu, dcs
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
@@ -190,16 +200,18 @@ def main():
     print(f'Generating {args.output}...')
 
     atomic_numbers = range(args.zmin, args.zmax + 1)
+    projectiles = {-1: 'electron', 1: 'positron'}
     results = {}
     with ProcessPoolExecutor(max_workers=args.jobs) as pool:
-        futures = {pool.submit(run_element, Z, elscata, args.elsepa_data): Z
-                   for Z in atomic_numbers}
+        futures = [pool.submit(run_element, Z, elscata, args.elsepa_data, ielec)
+                   for Z in atomic_numbers for ielec in projectiles]
         for future in futures:
-            Z, mu, dcs = future.result()
-            print('Processing {} data...'.format(ATOMIC_SYMBOL[Z]))
-            results[Z] = (mu, dcs)
+            Z, ielec, mu, dcs = future.result()
+            print('Processing {} {} data...'.format(
+                ATOMIC_SYMBOL[Z], projectiles[ielec]))
+            results[Z, ielec] = (mu, dcs)
 
-    reference_mu = results[args.zmin][0]
+    reference_mu = results[args.zmin, -1][0]
     with h5py.File(args.output, 'w') as f:
         f.attrs['filetype'] = np.bytes_('elastic_dpwa')
         f.attrs['source'] = np.bytes_(
@@ -213,19 +225,20 @@ def main():
         f.create_dataset('mu', data=reference_mu)
 
         for Z in atomic_numbers:
-            mu, dcs = results[Z]
-            if not np.allclose(mu, reference_mu, rtol=1e-12, atol=0.0):
-                raise RuntimeError(f'Z={Z}: angular grid differs')
-
             # Create group for this element
             group = f.create_group(f'{Z:03}')
-            # Stored as log(dcs): the cross section spans many decades and its
-            # logarithm is smooth, which compresses to 9.9 MB against 16.9 MB
-            # for the cross section itself. Round trip is accurate to 4e-6,
-            # well inside the precision of the calculation.
-            group.create_dataset('log_dcs', data=np.log(dcs).astype(np.float32),
-                                 compression='gzip', compression_opts=9,
-                                 shuffle=True)
+            for ielec, name in projectiles.items():
+                mu, dcs = results[Z, ielec]
+                if not np.allclose(mu, reference_mu, rtol=1e-12, atol=0.0):
+                    raise RuntimeError(f'Z={Z} {name}: angular grid differs')
+
+                # Stored as log(dcs): the cross section spans many decades and
+                # its logarithm is smooth, which compresses to 9.9 MB against
+                # 16.9 MB for the cross section itself. Round trip is accurate
+                # to 4e-6, well inside the precision of the calculation.
+                group.create_group(name).create_dataset(
+                    'log_dcs', data=np.log(dcs).astype(np.float32),
+                    compression='gzip', compression_opts=9, shuffle=True)
 
     size = os.path.getsize(args.output) / 1e6
     print(f'Wrote {args.output} ({size:.1f} MB)')
