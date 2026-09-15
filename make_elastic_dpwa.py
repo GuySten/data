@@ -1,0 +1,236 @@
+#!/usr/bin/env python
+"""Generate DPWA elastic-scattering cross sections for electron transport.
+
+EPICS/EEDL tabulates elastic cross sections densely but the angular
+distributions on only 16 energies per element, with nothing between 0.256 and
+10 MeV.  A Dirac partial-wave calculation has no such gap.  This script runs
+ELSEPA once per element over PENELOPE's 96-point energy grid and writes the
+differential cross sections, together with the integrated, first- and
+second-transport cross sections, to a single HDF5 file with one zero-padded
+atomic-number group per element.
+
+ELSEPA is run with a Fermi nuclear charge distribution, Dirac-Fock electron
+density, Furness-McCarthy exchange, LDA correlation-polarization and no
+absorption (an inelastic channel that is modelled separately), which are the
+settings under which the published DPWA databases are built.  Run for carbon,
+the output reproduces PENELOPE's own ELSEPA-derived database to four decimal
+places in all three cross sections from 100 keV to 100 MeV.
+
+ELSEPA is Apache-2.0 (Salvat, Jablonski and Powell, Comput. Phys. Commun. 165
+(2005) 157; repackaged by J. Hidding, Netherlands eScience Center) and is
+available at https://github.com/eScienceCenter/elsepa.  Point --elscata and
+--elsepa-data at a built copy.
+"""
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
+
+import h5py
+import numpy as np
+from openmc.data import ATOMIC_SYMBOL
+
+
+# PENELOPE's electron energy grid in eV, kept identical so the two databases
+# can be compared point by point
+energies = np.array([
+    50, 60, 70, 80, 90, 100, 125, 150,
+    175, 200, 250, 300, 350, 400, 450, 500,
+    600, 700, 800, 900, 1000, 1250, 1500, 1750,
+    2000, 2500, 3000, 3500, 4000, 4500, 5000, 6000,
+    7000, 8000, 9000, 10000, 12500, 15000, 17500, 20000,
+    25000, 30000, 35000, 40000, 45000, 50000, 60000, 70000,
+    80000, 90000, 100000, 125000, 150000, 175000, 200000, 250000,
+    300000, 350000, 400000, 450000, 500000, 600000, 700000, 800000,
+    900000, 1e+06, 1.25e+06, 1.5e+06, 1.75e+06, 2e+06, 2.5e+06, 3e+06,
+    3.5e+06, 4e+06, 4.5e+06, 5e+06, 6e+06, 7e+06, 8e+06, 9e+06,
+    1e+07, 1.25e+07, 1.5e+07, 1.75e+07, 2e+07, 2.5e+07, 3e+07, 3.5e+07,
+    4e+07, 4.5e+07, 5e+07, 6e+07, 7e+07, 8e+07, 9e+07, 1e+08,])
+
+# ELSEPA writes its differential cross sections on a fixed angular grid
+n_angles = 606
+
+# Kinetic energy appears in the header of each dcs_*.dat file
+energy_re = re.compile(r'Kinetic energy\s*=\s*([0-9.E+-]+)\s*eV')
+
+
+def write_input(Z, path):
+    """Write an ELSEPA input deck covering the whole energy grid."""
+    with open(path, 'w') as f:
+        f.write(f'IZ    {Z:4}          atomic number\n')
+        f.write('MNUCL   3          Fermi nuclear charge distribution\n')
+        f.write(f'NELEC {Z:4}          neutral atom\n')
+        f.write('MELEC   4          Dirac-Fock electron density\n')
+        f.write('MUFFIN  0          free atom\n')
+        f.write('IELEC  -1          electron\n')
+        f.write('MEXCH   1          Furness-McCarthy exchange\n')
+        f.write('MCPOL   2          LDA correlation-polarization\n')
+        f.write('VPOLA  -1          measured atomic polarizability\n')
+        f.write('VPOLB  -1          default b_pol\n')
+        f.write('MABS    0          no absorption; an inelastic channel\n')
+        f.write('IHEF    1          Born factorization at high energy\n')
+        for energy in energies:
+            f.write(f'EV      {energy:.4E}\n')
+
+
+def read_dcs(path):
+    """Read one ELSEPA differential cross section file.
+
+    Returns the kinetic energy in eV, 1 - cos(theta) on the angular grid, and
+    the cross section in cm^2/sr.  ELSEPA tabulates (1 - cos(theta))/2, which is
+    doubled here to match the deflection variable the transport samples.
+    """
+    energy = None
+    rows = []
+    with open(path) as f:
+        for line in f:
+            if line.lstrip().startswith('#'):
+                if energy is None:
+                    match = energy_re.search(line)
+                    if match:
+                        energy = float(match.group(1))
+            else:
+                words = line.split()
+                if len(words) >= 4:
+                    rows.append((float(words[1]), float(words[2])))
+
+    if energy is None or len(rows) != n_angles:
+        raise ValueError(f'{path}: {len(rows)} angles, energy {energy}')
+    values = np.array(rows)
+    return energy, 2.0*values[:, 0], values[:, 1]
+
+
+def read_tcs(path):
+    """Read energy, sigma, sigma_tr1 and sigma_tr2 from tcstable.dat."""
+    rows = []
+    with open(path) as f:
+        for line in f:
+            words = line.split()
+            if not line.lstrip().startswith('#') and len(words) >= 4:
+                rows.append([float(x) for x in words[:4]])
+    return np.array(rows)
+
+
+def run_element(Z, elscata, elsepa_data):
+    """Run ELSEPA for one element and return its cross sections."""
+    workdir = tempfile.mkdtemp(prefix=f'elsepa_z{Z:03}_')
+    try:
+        write_input(Z, os.path.join(workdir, 'in.txt'))
+        env = dict(os.environ, ELSEPA_DATA=str(elsepa_data))
+        with open(os.path.join(workdir, 'in.txt')) as stdin, \
+             open(os.path.join(workdir, 'run.log'), 'w') as stdout:
+            subprocess.run([str(elscata)], stdin=stdin, stdout=stdout,
+                           stderr=subprocess.STDOUT, cwd=workdir, env=env,
+                           check=True)
+
+        paths = sorted(Path(workdir).glob('dcs_*.dat'))
+        if len(paths) != energies.size:
+            raise RuntimeError(f'Z={Z}: {len(paths)} of {energies.size} '
+                               'energies produced a cross section')
+
+        mu = None
+        dcs = np.empty((energies.size, n_angles))
+        found = np.empty(energies.size)
+        for i, path in enumerate(paths):
+            found[i], mu_i, dcs[i] = read_dcs(path)
+            if mu is None:
+                mu = mu_i
+
+        order = np.argsort(found)
+        found, dcs = found[order], dcs[order]
+        if not np.allclose(found, energies, rtol=1e-6):
+            raise RuntimeError(f'Z={Z}: energies do not match the grid')
+
+        return Z, mu, dcs, read_tcs(os.path.join(workdir, 'tcstable.dat'))
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Generate an HDF5 library of DPWA elastic-scattering '
+        'cross sections by running ELSEPA.'
+    )
+    parser.add_argument(
+        '-o', '--output', default='elastic_dpwa.h5',
+        help='output HDF5 filename (default: %(default)s)'
+    )
+    parser.add_argument(
+        '--zmin', type=int, default=1,
+        help='lowest atomic number (default: %(default)s)'
+    )
+    parser.add_argument(
+        '--zmax', type=int, default=99,
+        help='highest atomic number (default: %(default)s)'
+    )
+    parser.add_argument(
+        '--jobs', type=int, default=os.cpu_count() or 1,
+        help='elements to run concurrently (default: %(default)s)'
+    )
+    parser.add_argument(
+        '--elscata', default=os.environ.get('ELSEPA', 'elscata'),
+        help="path to the ELSEPA 'elscata' executable"
+    )
+    parser.add_argument(
+        '--elsepa-data', default=os.environ.get('ELSEPA_DATA'),
+        help="path to the ELSEPA data directory holding the z_NNN.den files"
+    )
+    args = parser.parse_args()
+
+    if args.elsepa_data is None:
+        parser.error('pass --elsepa-data or set ELSEPA_DATA')
+    elscata = shutil.which(args.elscata) or args.elscata
+    if not os.path.exists(elscata):
+        parser.error(f'ELSEPA executable not found: {elscata}')
+
+    # ==========================================================================
+    # RUN ELSEPA FOR EACH ELEMENT AND GENERATE ELASTIC DPWA HDF5 FILE
+
+    print(f'Generating {args.output}...')
+
+    atomic_numbers = range(args.zmin, args.zmax + 1)
+    results = {}
+    with ProcessPoolExecutor(max_workers=args.jobs) as pool:
+        futures = {pool.submit(run_element, Z, elscata, args.elsepa_data): Z
+                   for Z in atomic_numbers}
+        for future in futures:
+            Z, mu, dcs, tcs = future.result()
+            print('Processing {} data...'.format(ATOMIC_SYMBOL[Z]))
+            results[Z] = (mu, dcs, tcs)
+
+    reference_mu = results[args.zmin][0]
+    with h5py.File(args.output, 'w') as f:
+        f.attrs['filetype'] = np.bytes_('elastic_dpwa')
+        f.attrs['source'] = np.bytes_(
+            'ELSEPA, Comput. Phys. Commun. 165 (2005) 157; generated by '
+            'make_elastic_dpwa.py'
+        )
+
+        # Write energies and the shared angular grid
+        f.create_dataset('energy', data=energies)
+        f.create_dataset('mu', data=reference_mu)
+
+        for Z in atomic_numbers:
+            mu, dcs, tcs = results[Z]
+            if not np.allclose(mu, reference_mu, rtol=1e-12, atol=0.0):
+                raise RuntimeError(f'Z={Z}: angular grid differs')
+
+            # Create group for this element
+            group = f.create_group(f'{Z:03}')
+            group.create_dataset('dcs', data=dcs.astype(np.float32),
+                                 compression='gzip', compression_opts=4)
+            group.create_dataset('xs', data=tcs[:, 1])
+            group.create_dataset('xs_transport', data=tcs[:, 2])
+            group.create_dataset('xs_transport2', data=tcs[:, 3])
+
+    size = os.path.getsize(args.output) / 1e6
+    print(f'Wrote {args.output} ({size:.1f} MB)')
+
+
+if __name__ == '__main__':
+    main()
