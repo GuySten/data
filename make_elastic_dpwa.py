@@ -5,12 +5,13 @@ EPICS/EEDL tabulates elastic cross sections densely but the angular
 distributions on only 16 energies per element, with nothing between 0.256 and
 10 MeV.  A Dirac partial-wave calculation has no such gap.  This script runs
 ELSEPA once per element over PENELOPE's 96-point energy grid and writes the
-differential cross sections, together with the first- and second-transport
-cross sections, to a single HDF5 file with one zero-padded atomic-number group
-per element.  The integrated cross section is not written: it is the integral
-of the differential cross section, and the consumer obtains it by integrating
-the same table it samples from rather than by reading a second number that
-agrees with it only to a percent.
+differential cross sections to a single HDF5 file with one zero-padded
+atomic-number group per element.  Nothing else is written.  ELSEPA also reports
+the integrated and the first- and second-transport cross sections, computed
+from the phase shifts rather than from the tabulated distribution, and they
+disagree with integrals of that distribution by up to about a percent.  The
+consumer integrates the table it samples, so shipping those numbers beside it
+would only invite something to use the wrong one.
 
 ELSEPA is run with a Fermi nuclear charge distribution, Dirac-Fock electron
 density, Furness-McCarthy exchange, LDA correlation-polarization and no
@@ -108,19 +109,8 @@ def read_dcs(path):
     return energy, 2.0*values[:, 0], values[:, 1]
 
 
-def read_tcs(path):
-    """Read energy, sigma, sigma_tr1 and sigma_tr2 from tcstable.dat."""
-    rows = []
-    with open(path) as f:
-        for line in f:
-            words = line.split()
-            if not line.lstrip().startswith('#') and len(words) >= 4:
-                rows.append([float(x) for x in words[:4]])
-    return np.array(rows)
-
-
 def run_element(Z, elscata, elsepa_data):
-    """Run ELSEPA for one element and return its cross sections."""
+    """Run ELSEPA for one element and return its differential cross sections."""
     workdir = tempfile.mkdtemp(prefix=f'elsepa_z{Z:03}_')
     try:
         write_input(Z, os.path.join(workdir, 'in.txt'))
@@ -149,7 +139,7 @@ def run_element(Z, elscata, elsepa_data):
         if not np.allclose(found, energies, rtol=1e-6):
             raise RuntimeError(f'Z={Z}: energies do not match the grid')
 
-        return Z, mu, dcs, read_tcs(os.path.join(workdir, 'tcstable.dat'))
+        return Z, mu, dcs
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
@@ -202,9 +192,9 @@ def main():
         futures = {pool.submit(run_element, Z, elscata, args.elsepa_data): Z
                    for Z in atomic_numbers}
         for future in futures:
-            Z, mu, dcs, tcs = future.result()
+            Z, mu, dcs = future.result()
             print('Processing {} data...'.format(ATOMIC_SYMBOL[Z]))
-            results[Z] = (mu, dcs, tcs)
+            results[Z] = (mu, dcs)
 
     reference_mu = results[args.zmin][0]
     with h5py.File(args.output, 'w') as f:
@@ -219,7 +209,7 @@ def main():
         f.create_dataset('mu', data=reference_mu)
 
         for Z in atomic_numbers:
-            mu, dcs, tcs = results[Z]
+            mu, dcs = results[Z]
             if not np.allclose(mu, reference_mu, rtol=1e-12, atol=0.0):
                 raise RuntimeError(f'Z={Z}: angular grid differs')
 
@@ -232,12 +222,6 @@ def main():
             group.create_dataset('log_dcs', data=np.log(dcs).astype(np.float32),
                                  compression='gzip', compression_opts=9,
                                  shuffle=True)
-            # The integrated cross section is left out on purpose; see above.
-            # The transport cross sections are ELSEPA's own phase-shift values
-            # and are kept as an independent check on the tabulated angular
-            # distribution, which has to reproduce them.
-            group.create_dataset('xs_transport', data=tcs[:, 2])
-            group.create_dataset('xs_transport2', data=tcs[:, 3])
 
     size = os.path.getsize(args.output) / 1e6
     print(f'Wrote {args.output} ({size:.1f} MB)')
