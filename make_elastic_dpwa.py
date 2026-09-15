@@ -5,9 +5,12 @@ EPICS/EEDL tabulates elastic cross sections densely but the angular
 distributions on only 16 energies per element, with nothing between 0.256 and
 10 MeV.  A Dirac partial-wave calculation has no such gap.  This script runs
 ELSEPA once per element over PENELOPE's 96-point energy grid and writes the
-differential cross sections, together with the integrated, first- and
-second-transport cross sections, to a single HDF5 file with one zero-padded
-atomic-number group per element.
+differential cross sections, together with the first- and second-transport
+cross sections, to a single HDF5 file with one zero-padded atomic-number group
+per element.  The integrated cross section is not written: it is the integral
+of the differential cross section, and the consumer obtains it by integrating
+the same table it samples from rather than by reading a second number that
+agrees with it only to a percent.
 
 ELSEPA is run with a Fermi nuclear charge distribution, Dirac-Fock electron
 density, Furness-McCarthy exchange, LDA correlation-polarization and no
@@ -229,7 +232,10 @@ def main():
             group.create_dataset('log_dcs', data=np.log(dcs).astype(np.float32),
                                  compression='gzip', compression_opts=9,
                                  shuffle=True)
-            group.create_dataset('xs', data=tcs[:, 1])
+            # The integrated cross section is left out on purpose; see above.
+            # The transport cross sections are ELSEPA's own phase-shift values
+            # and are kept as an independent check on the tabulated angular
+            # distribution, which has to reproduce them.
             group.create_dataset('xs_transport', data=tcs[:, 2])
             group.create_dataset('xs_transport2', data=tcs[:, 3])
 
